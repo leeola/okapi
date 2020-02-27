@@ -1,5 +1,6 @@
 use darling::{Error, FromMeta};
 use proc_macro::TokenStream;
+use proc_macro2::TokenTree;
 use rocket_http::{ext::IntoOwned, uri::Origin, MediaType, Method};
 use std::str::FromStr;
 use syn::spanned::Spanned;
@@ -11,6 +12,7 @@ pub struct Route {
     pub origin: Origin<'static>,
     pub media_type: Option<MediaType>,
     pub data_param: Option<String>,
+    pub doc_string: Option<String>,
 }
 
 impl Route {
@@ -94,7 +96,7 @@ struct MethodRouteAttributeNamedMeta {
     data: Option<String>,
 }
 
-fn parse_route_attr(args: &[NestedMeta]) -> Result<Route, Error> {
+fn parse_route_attr(args: &[NestedMeta], doc_string: Option<String>) -> Result<Route, Error> {
     if args.is_empty() {
         return Err(Error::too_few_items(1));
     }
@@ -105,10 +107,15 @@ fn parse_route_attr(args: &[NestedMeta]) -> Result<Route, Error> {
         origin: named.path.0,
         media_type: named.format.map(|x| x.0),
         data_param: named.data.map(trim_angle_brackers),
+        doc_string,
     })
 }
 
-fn parse_method_route_attr(method: Method, args: &[NestedMeta]) -> Result<Route, Error> {
+fn parse_method_route_attr(
+    method: Method,
+    args: &[NestedMeta],
+    doc_string: Option<String>,
+) -> Result<Route, Error> {
     if args.is_empty() {
         return Err(Error::too_few_items(1));
     }
@@ -119,6 +126,7 @@ fn parse_method_route_attr(method: Method, args: &[NestedMeta]) -> Result<Route,
         origin: origin.0,
         media_type: named.format.map(|x| x.0),
         data_param: named.data.map(trim_angle_brackers),
+        doc_string,
     })
 }
 
@@ -130,10 +138,10 @@ fn trim_angle_brackers(mut s: String) -> String {
     s
 }
 
-fn parse_attr(name: &str, args: &[NestedMeta]) -> Result<Route, Error> {
+fn parse_attr(name: &str, args: &[NestedMeta], doc_string: Option<String>) -> Result<Route, Error> {
     match Method::from_str(name) {
-        Ok(method) => parse_method_route_attr(method, args),
-        Err(()) => parse_route_attr(args),
+        Ok(method) => parse_method_route_attr(method, args, doc_string),
+        Err(()) => parse_route_attr(args, doc_string),
     }
 }
 
@@ -159,22 +167,55 @@ fn to_name_and_args(attr: &Attribute) -> Option<(String, Vec<NestedMeta>)> {
     }
 }
 
-pub(crate) fn parse_attrs<'a>(
-    attrs: impl IntoIterator<Item = &'a Attribute>,
-) -> Result<Route, TokenStream> {
-    match attrs.into_iter().find(|a| is_route_attribute(a)) {
-        Some(attr) => {
-            let span = attr.span();
-            let (name, args) = to_name_and_args(&attr)
-                .ok_or_else(|| TokenStream::from(quote_spanned! {span=>
-                    compile_error!("Malformed route attribute");
-                }))?;
+pub(crate) fn parse_attrs<'a>(attrs: &[Attribute]) -> Result<Route, TokenStream> {
+    let doc_lines = attrs
+        .iter()
+        .filter(|attr| {
+            let ident = match attr.path.get_ident() {
+                Some(i) => i,
+                None => return false,
+            };
+            // FIXME: is there a better way to check the ident type? This allocation makes me sad.
+            ident.to_string() == "doc"
+        })
+        .filter_map(|attr| {
+            // FIXME: fetch the literal without cloning the tokens.
+            let mut iter = attr.tokens.clone().into_iter();
+            iter.next(); // ignore punct
+            match iter.next() {
+                Some(TokenTree::Literal(lit)) => Some(lit),
+                _ => None,
+            }
+        })
+        .map(|literal| {
+            // FIXME: can the lit be converted to a string without the quotes?
+            let mut quoted_literal = literal.to_string();
+            quoted_literal.remove(0);
+            quoted_literal.pop();
+            // drop optional but common whitespace in the beginning
+            quoted_literal.trim_start().to_owned()
+        })
+        .collect::<Vec<_>>();
 
-            parse_attr(&name, &args)
-                .map_err(|e| e.with_span(&attr).write_errors().into())
-        }
-        None => Err(quote! {
-                compile_error!("Could not find Rocket route attribute. Ensure the #[openapi] attribute is placed *before* the Rocket route attribute.");
-            }.into()),
-    }
+    let doc_string = if !doc_lines.is_empty() {
+        Some(doc_lines.join("\n"))
+    } else {
+        None
+    };
+
+    let route_attr = attrs
+        .into_iter()
+        .find(|a| is_route_attribute(a))
+        .ok_or_else(|| TokenStream::from(quote! {
+            compile_error!("Could not find Rocket route attribute. Ensure the #[openapi] attribute is placed *before* the Rocket route attribute.");
+        }))?;
+
+    let span = route_attr.span();
+    let (name, args) = to_name_and_args(&route_attr).ok_or_else(|| {
+        TokenStream::from(quote_spanned! {span=>
+            compile_error!("Malformed route attribute");
+        })
+    })?;
+
+    parse_attr(&name, &args, doc_string).map_err(|e| e.with_span(&route_attr).write_errors().into())
 }

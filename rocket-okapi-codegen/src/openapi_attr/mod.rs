@@ -87,12 +87,50 @@ fn create_route_operation_fn(route_fn: ItemFn, route: route_attr::Route) -> Toke
     let path = route.origin.path().replace("<", "{").replace(">", "}");
     let method = Ident::new(&to_pascal_case_string(route.method), Span::call_site());
 
+    use proc_macro2::{Delimiter, Group, Literal, TokenTree};
+    use std::iter::FromIterator;
+    let summary_string = route.doc_string.as_ref().map(|doc_string| {
+        doc_string
+            .split('\n')
+            .into_iter()
+            .take_while(|s| *s != "")
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    let summary = match summary_string {
+        Some(sum_str) => proc_macro2::TokenStream::from_iter(vec![
+            TokenTree::Ident(Ident::new("Some", Span::call_site())),
+            TokenTree::Group(Group::new(
+                Delimiter::Parenthesis,
+                proc_macro2::TokenStream::from(TokenTree::Literal(Literal::string(&sum_str))),
+            )),
+        ]),
+        None => {
+            proc_macro2::TokenStream::from(TokenTree::Ident(Ident::new("None", Span::call_site())))
+        }
+    };
+
+    let description = match route.doc_string {
+        Some(doc_string) => proc_macro2::TokenStream::from_iter(vec![
+            TokenTree::Ident(Ident::new("Some", Span::call_site())),
+            TokenTree::Group(Group::new(
+                Delimiter::Parenthesis,
+                proc_macro2::TokenStream::from(TokenTree::Literal(Literal::string(&doc_string))),
+            )),
+        ]),
+        None => {
+            proc_macro2::TokenStream::from(TokenTree::Ident(Ident::new("None", Span::call_site())))
+        }
+    };
+
     TokenStream::from(quote! {
         pub fn #fn_name(
             gen: &mut ::rocket_okapi::gen::OpenApiGenerator,
             op_id: String,
         ) -> ::rocket_okapi::Result<()> {
             let responses = <#return_type as ::rocket_okapi::response::OpenApiResponder>::responses(gen)?;
+            let description: Option<String> = #description.map(str::to_owned);
+            let summary: Option<String> = #summary.map(str::to_owned);
             let request_body = #request_body;
             let parameters = vec![#(#params),*];
             gen.add_operation(::rocket_okapi::OperationInfo {
@@ -100,6 +138,8 @@ fn create_route_operation_fn(route_fn: ItemFn, route: route_attr::Route) -> Toke
                 method: ::rocket::http::Method::#method,
                 operation: ::okapi::openapi3::Operation {
                     operation_id: Some(op_id),
+                    summary,
+                    description,
                     responses,
                     request_body,
                     parameters,
