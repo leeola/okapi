@@ -3,10 +3,10 @@ mod route_attr;
 use crate::get_add_operation_fn_name;
 use darling::FromMeta;
 use proc_macro::TokenStream;
-use proc_macro2::Span;
+use proc_macro2::{Delimiter, Group, Literal, Span, TokenTree};
 use quote::ToTokens;
 use rocket_http::Method;
-use std::collections::BTreeMap as Map;
+use std::{collections::BTreeMap as Map, iter::FromIterator};
 use syn::{AttributeArgs, FnArg, Ident, ItemFn, ReturnType, Type, TypeTuple};
 
 #[derive(Debug, Default, FromMeta)]
@@ -87,8 +87,6 @@ fn create_route_operation_fn(route_fn: ItemFn, route: route_attr::Route) -> Toke
     let path = route.origin.path().replace("<", "{").replace(">", "}");
     let method = Ident::new(&to_pascal_case_string(route.method), Span::call_site());
 
-    use proc_macro2::{Delimiter, Group, Literal, TokenTree};
-    use std::iter::FromIterator;
     let summary_string = route.doc_string.as_ref().map(|doc_string| {
         doc_string
             .split('\n')
